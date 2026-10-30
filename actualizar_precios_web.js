@@ -61,7 +61,6 @@ function buscarPrecioWebProfundo(nombreProducto) {
   });
 }
 
-// Función recursiva para buscar objetos que tengan nombre de producto en todo Firebase
 async function buscarYActualizarRecursivo(nodo, refNodo) {
   let snapshot = await refNodo.once('value');
   let datos = snapshot.val();
@@ -74,16 +73,20 @@ async function buscarYActualizarRecursivo(nodo, refNodo) {
     for (let i = 0; i < datos.length; i++) {
       if (datos[i] && typeof datos[i] === 'object') {
         let nombreOriginal = datos[i].nombre || datos[i].name || '';
-        if (nombreOriginal && (!datos[i].sub || datos[i].precio === 10 || !datos[i].precio)) {
-          console.log(`\n✨ Procesando producto: "${nombreOriginal}"`);
+        let precioActual = datos[i].precio;
+        
+        // Forzar actualización si el precio es 10 (como texto o número) o si falta
+        let esPrecioPorDefecto = precioActual == 10 || precioActual === '10' || !precioActual;
+
+        if (nombreOriginal && (esPrecioPorDefecto || !datos[i].sub)) {
+          console.log(`\n✨ Procesando producto: "${nombreOriginal}" (Precio anterior: ${precioActual})`);
           try {
             const res = await translate(nombreOriginal, { to: 'pt' });
             datos[i].sub = res.text;
-            console.log(`-> Traducción (pt): ${datos[i].sub}`);
           } catch (err) {}
 
           datos[i].precio = await buscarPrecioWebProfundo(nombreOriginal);
-          console.log(`-> Precio asignado: R$ ${datos[i].precio}`);
+          console.log(`-> Nuevo precio asignado: R$ ${datos[i].precio}`);
           modificado = true;
         }
       }
@@ -93,20 +96,20 @@ async function buscarYActualizarRecursivo(nodo, refNodo) {
       let item = datos[key];
       if (item && typeof item === 'object') {
         let nombreOriginal = item.nombre || item.name || '';
-        // Si el objeto tiene un nombre de producto válido
-        if (nombreOriginal && (!item.sub || item.precio === 10 || !item.precio)) {
-          console.log(`\n✨ Procesando producto: "${nombreOriginal}"`);
+        let precioActual = item.precio;
+        let esPrecioPorDefecto = precioActual == 10 || precioActual === '10' || !precioActual;
+
+        if (nombreOriginal && (esPrecioPorDefecto || !item.sub)) {
+          console.log(`\n✨ Procesando producto: "${nombreOriginal}" (Precio anterior: ${precioActual})`);
           try {
             const res = await translate(nombreOriginal, { to: 'pt' });
             item.sub = res.text;
-            console.log(`-> Traducción (pt): ${item.sub}`);
           } catch (err) {}
 
           item.precio = await buscarPrecioWebProfundo(nombreOriginal);
-          console.log(`-> Precio asignado: R$ ${item.precio}`);
+          console.log(`-> Nuevo precio asignado: R$ ${item.precio}`);
           modificado = true;
         } else {
-          // Si es un contenedor (como categorías), buscamos dentro recursivamente
           let subModificado = await buscarYActualizarRecursivo(item, refNodo.child(key));
           if (subModificado) modificado = true;
         }
@@ -123,15 +126,15 @@ async function buscarYActualizarRecursivo(nodo, refNodo) {
 
 async function sincronizarAutomatico() {
   try {
-    console.log('🔍 Escaneando toda la base de datos de Firebase...');
+    console.log('🔍 Escaneando base de datos para corregir precios por defecto (10)...');
     const rootRef = db.ref();
     
     let actualizado = await buscarYActualizarRecursivo(null, rootRef);
 
     if (actualizado) {
-      console.log('\n✅ ¡Firebase actualizado con éxito!');
+      console.log('\n✅ ¡Firebase actualizado y corregido con éxito!');
     } else {
-      console.log('\n💤 No se encontraron productos pendientes de actualizar en Firebase.');
+      console.log('\n💤 No hay productos con precios por defecto pendientes.');
     }
 
     process.exit(0);
