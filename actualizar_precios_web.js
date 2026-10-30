@@ -61,50 +61,77 @@ function buscarPrecioWebProfundo(nombreProducto) {
   });
 }
 
-async function sincronizarAutomatico() {
-  try {
-    console.log('🔍 Revisando Firebase en busca de productos nuevos o pendientes...');
-    const ref = db.ref('productos');
-    const snapshot = await ref.once('value');
-    let productos = snapshot.val();
+// Función recursiva para buscar objetos que tengan nombre de producto en todo Firebase
+async function buscarYActualizarRecursivo(nodo, refNodo) {
+  let snapshot = await refNodo.once('value');
+  let datos = snapshot.val();
 
-    if (!productos) {
-      console.log('No hay productos en Firebase.');
-      process.exit(0);
-    }
+  if (!datos) return false;
 
-    let cambiosRealizados = false;
+  let modificado = false;
 
-    for (let id in productos) {
-      let prod = productos[id];
-      let nombreOriginal = prod.nombre || prod.name || '';
+  if (Array.isArray(datos)) {
+    for (let i = 0; i < datos.length; i++) {
+      if (datos[i] && typeof datos[i] === 'object') {
+        let nombreOriginal = datos[i].nombre || datos[i].name || '';
+        if (nombreOriginal && (!datos[i].sub || datos[i].precio === 10 || !datos[i].precio)) {
+          console.log(`\n✨ Procesando producto: "${nombreOriginal}"`);
+          try {
+            const res = await translate(nombreOriginal, { to: 'pt' });
+            datos[i].sub = res.text;
+            console.log(`-> Traducción (pt): ${datos[i].sub}`);
+          } catch (err) {}
 
-      // Si el producto no tiene subtítulo en portugués (sub) o su precio es el genérico de 10 o está vacio
-      if (nombreOriginal && (!prod.sub || prod.precio === 10 || !prod.precio)) {
-        console.log(`\n✨ Detectado producto pendiente: "${nombreOriginal}"`);
-
-        // 1. Traducir al portugués de Brasil
-        try {
-          const res = await translate(nombreOriginal, { to: 'pt' });
-          prod.sub = res.text;
-          console.log(`-> Traducido al portugués: ${prod.sub}`);
-        } catch (err) {
-          console.error(`Error en traducción:`, err.message);
+          datos[i].precio = await buscarPrecioWebProfundo(nombreOriginal);
+          console.log(`-> Precio asignado: R$ ${datos[i].precio}`);
+          modificado = true;
         }
-
-        // 2. Buscar precio real o calcular dinámico de mercado
-        prod.precio = await buscarPrecioWebProfundo(nombreOriginal);
-        console.log(`-> Precio asignado: R$ ${prod.precio}`);
-
-        cambiosRealizados = true;
       }
     }
+  } else if (typeof datos === 'object') {
+    for (let key in datos) {
+      let item = datos[key];
+      if (item && typeof item === 'object') {
+        let nombreOriginal = item.nombre || item.name || '';
+        // Si el objeto tiene un nombre de producto válido
+        if (nombreOriginal && (!item.sub || item.precio === 10 || !item.precio)) {
+          console.log(`\n✨ Procesando producto: "${nombreOriginal}"`);
+          try {
+            const res = await translate(nombreOriginal, { to: 'pt' });
+            item.sub = res.text;
+            console.log(`-> Traducción (pt): ${item.sub}`);
+          } catch (err) {}
 
-    if (cambiosRealizados) {
-      await ref.set(productos);
-      console.log('\n✅ ¡Firebase sincronizado y actualizado automáticamente con éxito!');
+          item.precio = await buscarPrecioWebProfundo(nombreOriginal);
+          console.log(`-> Precio asignado: R$ ${item.precio}`);
+          modificado = true;
+        } else {
+          // Si es un contenedor (como categorías), buscamos dentro recursivamente
+          let subModificado = await buscarYActualizarRecursivo(item, refNodo.child(key));
+          if (subModificado) modificado = true;
+        }
+      }
+    }
+  }
+
+  if (modificado) {
+    await refNodo.set(datos);
+  }
+
+  return modificado;
+}
+
+async function sincronizarAutomatico() {
+  try {
+    console.log('🔍 Escaneando toda la base de datos de Firebase...');
+    const rootRef = db.ref();
+    
+    let actualizado = await buscarYActualizarRecursivo(null, rootRef);
+
+    if (actualizado) {
+      console.log('\n✅ ¡Firebase actualizado con éxito!');
     } else {
-      console.log('\n💤 No hay nuevos productos pendientes de procesar.');
+      console.log('\n💤 No se encontraron productos pendientes de actualizar en Firebase.');
     }
 
     process.exit(0);
