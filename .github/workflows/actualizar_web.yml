@@ -1,11 +1,12 @@
-name: Actualizar Producto Individual
+name: Sincronización Automática de Firebase
 
 on:
-  repository_dispatch:
-    types: [nuevo_producto]
+  schedule:
+    - cron: '*/5 * * * *' # Se ejecuta automáticamente cada 5 minutos en segundo plano
+  workflow_dispatch:     # Te deja un botón en GitHub por si quieres forzarlo a mano al instante
 
 jobs:
-  actualizar:
+  sincronizar:
     runs-on: ubuntu-latest
 
     steps:
@@ -20,11 +21,10 @@ jobs:
       - name: Instalar dependencias
         run: npm install firebase-admin @vitalets/google-translate-api
 
-      - name: Ejecutar script
+      - name: Ejecutar script de sincronización
         env:
           FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
           FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
           FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
           FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
-          PRODUCTO_NUEVO: ${{ github.event.client_payload.nombre_producto }}
         run: node actualizar_precios_web.js
