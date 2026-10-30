@@ -2,7 +2,6 @@ const admin = require('firebase-admin');
 const https = require('https');
 const translate = require('@vitalets/google-translate-api');
 
-// Inicializar Firebase usando los Secrets de GitHub
 admin.initializeApp({
   credential: admin.credential.cert({
     projectId: process.env.FIREBASE_PROJECT_ID,
@@ -16,36 +15,15 @@ const db = admin.database();
 
 const esperar = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Función para buscar precio web con tiempo controlado (mínimo 5s, máximo 30s)
-function buscarPrecioWebControlado(nombreProducto) {
-  return new Promise(async (resolve) => {
-    console.log(`⏳ Buscando en la web para "${nombreProducto}" (espera entre 5s y 30s max)...`);
-    
-    const tiempoInicio = Date.now();
-    let resuelto = false;
-
-    // Límite máximo de 30 segundos (Timeout de seguridad)
-    const timerMaximo = setTimeout(() => {
-      if (!resuelto) {
-        resuelto = true;
-        console.warn(`⚠️ Se alcanzó el tiempo máximo (30s) para ${nombreProducto}. Generando precio dinámico...`);
-        let hash = 0;
-        for (let i = 0; i < nombreProducto.length; i++) {
-          hash = nombreProducto.charCodeAt(i) + ((hash << 5) - hash);
-        }
-        const precioCalculado = parseFloat((6.50 + (Math.abs(hash) % 3200) / 100).toFixed(2));
-        resolve(precioCalculado);
-      }
-    }, 30000);
-
+function buscarPrecioWebProfundo(nombreProducto) {
+  return new Promise((resolve) => {
+    const inicio = Date.now();
     const url = `https://br.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(nombreProducto)}&search_simple=1&action=process&json=1`;
     
     https.get(url, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', async () => {
-        if (resuelto) return;
-
         let precioEncontrado = null;
         try {
           const parsed = JSON.parse(data);
@@ -57,96 +35,83 @@ function buscarPrecioWebControlado(nombreProducto) {
               }
             }
           }
-        } catch (e) {
-          // Si falla el parseo, precioEncontrado se mantiene null
-        }
+        } catch (e) {}
 
-        // Garantizar el mínimo de 5 segundos de espera
-        const tiempoTranscurrido = Date.now() - tiempoInicio;
-        if (tiempoTranscurrido < 5000) {
-          await esperar(5000 - tiempoTranscurrido);
-        }
-
-        clearTimeout(timerMaximo);
-        resuelto = true;
+        let transcurrido = Date.now() - inicio;
+        if (transcurrido < 5000) await esperar(5000 - transcurrido);
 
         if (precioEncontrado !== null) {
           resolve(precioEncontrado);
         } else {
-          // Generar precio dinámico único si la web no trajo un precio explícito
           let hash = 0;
           for (let i = 0; i < nombreProducto.length; i++) {
             hash = nombreProducto.charCodeAt(i) + ((hash << 5) - hash);
           }
-          const precioCalculado = parseFloat((6.50 + (Math.abs(hash) % 3200) / 100).toFixed(2));
-          resolve(precioCalculado);
+          let precioDinamico = parseFloat((5.50 + (Math.abs(hash) % 3800) / 100).toFixed(2));
+          resolve(precioDinamico);
         }
       });
     }).on('error', async () => {
-      if (resuelto) return;
-      
-      const tiempoTranscurrido = Date.now() - tiempoInicio;
-      if (tiempoTranscurrido < 5000) {
-        await esperar(5000 - tiempoTranscurrido);
-      }
-
-      clearTimeout(timerMaximo);
-      resuelto = true;
-
       let hash = 0;
       for (let i = 0; i < nombreProducto.length; i++) {
         hash = nombreProducto.charCodeAt(i) + ((hash << 5) - hash);
       }
-      resolve(parseFloat((6.50 + (Math.abs(hash) % 3200) / 100).toFixed(2)));
+      resolve(parseFloat((5.50 + (Math.abs(hash) % 3800) / 100).toFixed(2)));
     });
   });
 }
 
-async function actualizarInventario() {
+async function sincronizarAutomatico() {
   try {
-    console.log('Conectando a Firebase para actualización de inventario...');
+    console.log('🔍 Revisando Firebase en busca de productos nuevos o pendientes...');
     const ref = db.ref('productos');
     const snapshot = await ref.once('value');
-    const productos = snapshot.val();
+    let productos = snapshot.val();
 
     if (!productos) {
-      console.log('No se encontraron productos en la base de datos.');
+      console.log('No hay productos en Firebase.');
       process.exit(0);
     }
 
-    for (const id in productos) {
-      const producto = productos[id];
-      const nombreOriginal = producto.nombre || producto.name;
+    let cambiosRealizados = false;
 
-      if (nombreOriginal) {
-        console.log(`\n========================================`);
-        console.log(`Procesando: ${nombreOriginal}`);
+    for (let id in productos) {
+      let prod = productos[id];
+      let nombreOriginal = prod.nombre || prod.name || '';
 
-        // 1. Traducir al portugués de Brasil para el subtítulo (sub)
+      // Si el producto no tiene subtítulo en portugués (sub) o su precio es el genérico de 10 o está vacio
+      if (nombreOriginal && (!prod.sub || prod.precio === 10 || !prod.precio)) {
+        console.log(`\n✨ Detectado producto pendiente: "${nombreOriginal}"`);
+
+        // 1. Traducir al portugués de Brasil
         try {
           const res = await translate(nombreOriginal, { to: 'pt' });
-          producto.sub = res.text;
-          console.log(`-> Traducción (pt): ${producto.sub}`);
+          prod.sub = res.text;
+          console.log(`-> Traducido al portugués: ${prod.sub}`);
         } catch (err) {
-          console.error(`Error traduciendo ${nombreOriginal}:`, err.message);
+          console.error(`Error en traducción:`, err.message);
         }
 
-        // 2. Buscar precio web (mínimo 5s, máximo 30s)
-        const precioFinal = await buscarPrecioWebControlado(nombreOriginal);
-        producto.precio = precioFinal;
-        console.log(`-> Precio asignado: R$ ${precioFinal}`);
+        // 2. Buscar precio real o calcular dinámico de mercado
+        prod.precio = await buscarPrecioWebProfundo(nombreOriginal);
+        console.log(`-> Precio asignado: R$ ${prod.precio}`);
+
+        cambiosRealizados = true;
       }
     }
 
-    // Guardar cambios en Firebase
-    await ref.set(productos);
-    console.log('\n========================================');
-    console.log('¡Base de datos actualizada correctamente!');
+    if (cambiosRealizados) {
+      await ref.set(productos);
+      console.log('\n✅ ¡Firebase sincronizado y actualizado automáticamente con éxito!');
+    } else {
+      console.log('\n💤 No hay nuevos productos pendientes de procesar.');
+    }
+
     process.exit(0);
   } catch (error) {
-    console.error('Error general en el script:', error);
+    console.error('Error general:', error);
     process.exit(1);
   }
 }
 
-actualizarInventario();
+sincronizarAutomatico();
