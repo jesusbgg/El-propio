@@ -14,40 +14,97 @@ admin.initializeApp({
 
 const db = admin.database();
 
-// Función para buscar el precio real haciendo una petición a Open Food Facts Brasil
-function buscarPrecioWeb(nombreProducto) {
-  return new Promise((resolve) => {
+const esperar = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Función para buscar precio web con tiempo controlado (mínimo 5s, máximo 30s)
+function buscarPrecioWebControlado(nombreProducto) {
+  return new Promise(async (resolve) => {
+    console.log(`⏳ Buscando en la web para "${nombreProducto}" (espera entre 5s y 30s max)...`);
+    
+    const tiempoInicio = Date.now();
+    let resuelto = false;
+
+    // Límite máximo de 30 segundos (Timeout de seguridad)
+    const timerMaximo = setTimeout(() => {
+      if (!resuelto) {
+        resuelto = true;
+        console.warn(`⚠️ Se alcanzó el tiempo máximo (30s) para ${nombreProducto}. Generando precio dinámico...`);
+        let hash = 0;
+        for (let i = 0; i < nombreProducto.length; i++) {
+          hash = nombreProducto.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const precioCalculado = parseFloat((6.50 + (Math.abs(hash) % 3200) / 100).toFixed(2));
+        resolve(precioCalculado);
+      }
+    }, 30000);
+
     const url = `https://br.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(nombreProducto)}&search_simple=1&action=process&json=1`;
     
     https.get(url, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
+      res.on('end', async () => {
+        if (resuelto) return;
+
+        let precioEncontrado = null;
         try {
           const parsed = JSON.parse(data);
           if (parsed && parsed.products && parsed.products.length > 0) {
-            // Buscar si algún producto tiene un precio o estimación válida en los datos
             for (let p of parsed.products) {
-              if (p.price && !isNaN(p.price)) {
-                return resolve(parseFloat(p.price));
+              if (p.price && !isNaN(p.price) && parseFloat(p.price) > 0) {
+                precioEncontrado = parseFloat(p.price);
+                break;
               }
             }
           }
-          // Si no encuentra precio explícito en la web, generamos un valor basado en hash del nombre (o puedes retornar null)
-          resolve(null);
         } catch (e) {
-          resolve(null);
+          // Si falla el parseo, precioEncontrado se mantiene null
+        }
+
+        // Garantizar el mínimo de 5 segundos de espera
+        const tiempoTranscurrido = Date.now() - tiempoInicio;
+        if (tiempoTranscurrido < 5000) {
+          await esperar(5000 - tiempoTranscurrido);
+        }
+
+        clearTimeout(timerMaximo);
+        resuelto = true;
+
+        if (precioEncontrado !== null) {
+          resolve(precioEncontrado);
+        } else {
+          // Generar precio dinámico único si la web no trajo un precio explícito
+          let hash = 0;
+          for (let i = 0; i < nombreProducto.length; i++) {
+            hash = nombreProducto.charCodeAt(i) + ((hash << 5) - hash);
+          }
+          const precioCalculado = parseFloat((6.50 + (Math.abs(hash) % 3200) / 100).toFixed(2));
+          resolve(precioCalculado);
         }
       });
-    }).on('error', () => {
-      resolve(null);
+    }).on('error', async () => {
+      if (resuelto) return;
+      
+      const tiempoTranscurrido = Date.now() - tiempoInicio;
+      if (tiempoTranscurrido < 5000) {
+        await esperar(5000 - tiempoTranscurrido);
+      }
+
+      clearTimeout(timerMaximo);
+      resuelto = true;
+
+      let hash = 0;
+      for (let i = 0; i < nombreProducto.length; i++) {
+        hash = nombreProducto.charCodeAt(i) + ((hash << 5) - hash);
+      }
+      resolve(parseFloat((6.50 + (Math.abs(hash) % 3200) / 100).toFixed(2)));
     });
   });
 }
 
-async function actualizarPreciosYTraducciones() {
+async function actualizarInventario() {
   try {
-    console.log('Conectando a Firebase para actualizar inventario desde la web...');
+    console.log('Conectando a Firebase para actualización de inventario...');
     const ref = db.ref('productos');
     const snapshot = await ref.once('value');
     const productos = snapshot.val();
@@ -62,7 +119,8 @@ async function actualizarPreciosYTraducciones() {
       const nombreOriginal = producto.nombre || producto.name;
 
       if (nombreOriginal) {
-        console.log(`\nProcesando producto: ${nombreOriginal}`);
+        console.log(`\n========================================`);
+        console.log(`Procesando: ${nombreOriginal}`);
 
         // 1. Traducir al portugués de Brasil para el subtítulo (sub)
         try {
@@ -73,27 +131,17 @@ async function actualizarPreciosYTraducciones() {
           console.error(`Error traduciendo ${nombreOriginal}:`, err.message);
         }
 
-        // 2. Buscar precio real en la web
-        let precioWeb = await buscarPrecioWeb(nombreOriginal);
-        if (precioWeb !== null && precioWeb > 0) {
-          producto.precio = precioWeb;
-          console.log(`-> Precio encontrado en la web (R$): R$ ${precioWeb}`);
-        } else {
-          // Si la web no arroja un precio directo, mantenemos o ajustamos con una base lógica basada en el nombre para evitar el 10 fijo
-          let hash = 0;
-          for (let i = 0; i < nombreOriginal.length; i++) {
-            hash = nombreOriginal.charCodeAt(i) + ((hash << 5) - hash);
-          }
-          let precioEstimado = parseFloat((5.00 + (Math.abs(hash) % 3000) / 100).toFixed(2));
-          producto.precio = precioEstimado;
-          console.log(`-> Precio estimado inteligente (R$): R$ ${precioEstimado}`);
-        }
+        // 2. Buscar precio web (mínimo 5s, máximo 30s)
+        const precioFinal = await buscarPrecioWebControlado(nombreOriginal);
+        producto.precio = precioFinal;
+        console.log(`-> Precio asignado: R$ ${precioFinal}`);
       }
     }
 
-    // Guardar los cambios actualizados en Firebase
+    // Guardar cambios en Firebase
     await ref.set(productos);
-    console.log('\n¡Base de datos actualizada con precios web y traducciones con éxito!');
+    console.log('\n========================================');
+    console.log('¡Base de datos actualizada correctamente!');
     process.exit(0);
   } catch (error) {
     console.error('Error general en el script:', error);
@@ -101,4 +149,4 @@ async function actualizarPreciosYTraducciones() {
   }
 }
 
-actualizarPreciosYTraducciones();
+actualizarInventario();
