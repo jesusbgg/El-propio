@@ -1,9 +1,8 @@
-name: Actualizar Precios Web y Traducción
+name: Actualizar Producto Individual
 
 on:
-  schedule:
-    - cron: '0 8 * * 1' # Se ejecuta todos los lunes a las 8:00 AM UTC
-  workflow_dispatch: # Permite ejecutarlo manualmente desde la pestaña Actions
+  repository_dispatch:
+    types: [nuevo_producto]
 
 jobs:
   actualizar:
@@ -21,10 +20,11 @@ jobs:
       - name: Instalar dependencias
         run: npm install firebase-admin @vitalets/google-translate-api
 
-      - name: Ejecutar script de actualización
+      - name: Ejecutar script
         env:
           FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
           FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
           FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
           FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
+          PRODUCTO_NUEVO: ${{ github.event.client_payload.nombre_producto }}
         run: node actualizar_precios_web.js
